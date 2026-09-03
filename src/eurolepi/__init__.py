@@ -1,4 +1,4 @@
-"""EuroLepi ID: European butterfly image classification toolkit."""
+"""EuroLepi ID: European butterfly classifier training and inference."""
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 

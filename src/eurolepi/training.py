@@ -1,4 +1,4 @@
-"""Reproducible MaxViT-T training and evaluation."""
+"""End-to-end MaxViT-T training from an installed dataset package."""
 
 from __future__ import annotations
 
@@ -6,273 +6,213 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import random
-from typing import Any
+import re
+from typing import Callable
+from uuid import uuid4
 
-import numpy as np
 import pandas as pd
+from PIL import Image
 
-from .manifest import validate_manifest
-from .metrics import macro_f1, topk_accuracy
-from .modeling import DEFAULT_BACKBONE, create_classifier, create_transform, load_torch_checkpoint
+from eurolepi.dataset_package import InstalledDataset, install_dataset
+from eurolepi.modeling import DEFAULT_BACKBONE, IMAGE_SIZE, create_model, image_transform, require_ml
+from eurolepi.registry import write_model_metadata
+from eurolepi.types import ModelRecord
 
 
-@dataclass
-class TrainingConfig:
-    manifest: str = "data/manifest.csv"
-    output_dir: str = "models/eurolepi_maxvit_tiny"
-    backbone: str = DEFAULT_BACKBONE
-    image_size: int = 224
-    batch_size: int = 32
-    epochs: int = 30
+@dataclass(frozen=True)
+class TrainingOptions:
+    epochs: int = 20
+    batch_size: int = 16
     learning_rate: float = 3e-4
     weight_decay: float = 0.05
     label_smoothing: float = 0.1
-    balanced_sampling: bool = True
-    num_workers: int = 0
+    backbone: str = DEFAULT_BACKBONE
+    image_size: int = IMAGE_SIZE
     seed: int = 42
-    patience: int = 6
-    reject_threshold: float = 0.65
-    pretrained: bool = True
-
-    @classmethod
-    def from_yaml(cls, path: str | Path) -> "TrainingConfig":
-        try:
-            import yaml
-        except ImportError as exc:
-            raise RuntimeError("Install training dependencies with: pip install -e .[ml]") from exc
-        values = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-        known = set(cls.__dataclass_fields__)
-        unknown = set(values) - known
-        if unknown:
-            raise ValueError(f"Unknown training config fields: {sorted(unknown)}")
-        return cls(**values)
 
 
-def _seed_everything(seed: int, torch) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+ProgressCallback = Callable[[int, int, dict[str, float]], None]
 
 
-def _build_loader(frame, class_to_index, transform, config, torch, *, training: bool):
-    from torch.utils.data import DataLoader, WeightedRandomSampler
+class _ButterflyDataset:
+    def __init__(self, frame, dataset_path, classes, transform):
+        torch, _, _ = require_ml()
+        self.torch = torch
+        self.frame = frame.reset_index(drop=True)
+        self.dataset_path = dataset_path
+        self.class_to_index = {name: index for index, name in enumerate(classes)}
+        self.transform = transform
 
-    from .dataset import ButterflyDataset
+    def __len__(self):
+        return len(self.frame)
 
-    dataset = ButterflyDataset(frame, class_to_index, transform)
-    sampler = None
-    shuffle = training
-    if training and config.balanced_sampling:
-        counts = frame["scientific_name"].value_counts()
-        weights = frame["scientific_name"].map(lambda name: 1.0 / counts[name]).to_numpy()
-        sampler = WeightedRandomSampler(
-            torch.as_tensor(weights, dtype=torch.double), len(weights), replacement=True
-        )
-        shuffle = False
-    return DataLoader(
-        dataset,
-        batch_size=config.batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        num_workers=config.num_workers,
-        pin_memory=torch.cuda.is_available(),
-    )
+    def __getitem__(self, index):
+        row = self.frame.iloc[index]
+        with Image.open(self.dataset_path / row["image_path"]) as source:
+            image = source.convert("RGB")
+        label = self.class_to_index[row["scientific_name"]]
+        return self.transform(image), self.torch.tensor(label, dtype=self.torch.long)
 
 
-def _run_epoch(model, loader, criterion, device, torch, optimizer=None, scaler=None):
-    training = optimizer is not None
-    model.train(training)
-    losses: list[float] = []
-    logits_all: list[np.ndarray] = []
-    targets_all: list[np.ndarray] = []
-    for images, targets, _ in loader:
-        images = images.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-        if training:
-            optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(
-            device_type=device.type,
-            dtype=torch.float16,
-            enabled=device.type == "cuda",
-        ):
-            logits = model(images)
-            loss = criterion(logits, targets)
-        if training:
-            if scaler is not None and scaler.is_enabled():
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
-        losses.append(float(loss.detach().cpu()))
-        logits_all.append(logits.detach().float().cpu().numpy())
-        targets_all.append(targets.detach().cpu().numpy())
-    logits_np = np.concatenate(logits_all) if logits_all else np.empty((0, 0))
-    targets_np = np.concatenate(targets_all) if targets_all else np.empty(0, dtype=int)
-    predictions = logits_np.argmax(axis=1) if len(logits_np) else np.empty(0, dtype=int)
-    class_count = logits_np.shape[1] if logits_np.ndim == 2 else 0
-    return {
-        "loss": float(np.mean(losses)) if losses else 0.0,
-        "top1": topk_accuracy(logits_np, targets_np, 1) if len(targets_np) else 0.0,
-        "top5": topk_accuracy(logits_np, targets_np, 5) if len(targets_np) else 0.0,
-        "macro_f1": macro_f1(predictions, targets_np, class_count) if class_count else 0.0,
-    }
+def _copy_reference_images(frame: pd.DataFrame, dataset_path: Path, model_path: Path) -> dict[str, str]:
+    reference_root = model_path / "references"
+    reference_root.mkdir(parents=True, exist_ok=True)
+    references: dict[str, str] = {}
+    for index, (species, rows) in enumerate(frame.groupby("scientific_name")):
+        source_path = dataset_path / rows.iloc[0]["image_path"]
+        relative_path = Path("references") / f"species-{index:04d}.jpg"
+        with Image.open(source_path) as source:
+            source.convert("RGB").save(model_path / relative_path, format="JPEG", quality=90)
+        references[species] = relative_path.as_posix()
+    return references
 
 
-def train(config: TrainingConfig) -> Path:
-    try:
-        import torch
-    except ImportError as exc:
-        raise RuntimeError("Install training dependencies with: pip install -e .[ml]") from exc
+def train_from_zip(
+    blob: bytes,
+    dataset_name: str,
+    workspace: Path,
+    options: TrainingOptions | None = None,
+    progress: ProgressCallback | None = None,
+) -> ModelRecord:
+    installed = install_dataset(blob, dataset_name, workspace / "datasets")
+    return train_installed_dataset(installed, workspace / "models", options, progress)
 
-    frame = pd.read_csv(config.manifest)
-    report = validate_manifest(frame, require_files=True, require_split=True)
-    if not report.valid:
-        raise ValueError("Invalid training manifest: " + "; ".join(report.errors))
-    _seed_everything(config.seed, torch)
 
-    classes = sorted(frame.loc[frame["split"] == "train", "scientific_name"].unique())
-    class_to_index = {name: index for index, name in enumerate(classes)}
-    train_frame = frame[frame["split"] == "train"]
-    validation_frame = frame[frame["split"] == "validation"]
-    if validation_frame.empty:
-        raise ValueError("Validation split is empty.")
+def train_installed_dataset(
+    dataset: InstalledDataset,
+    models_root: Path,
+    options: TrainingOptions | None = None,
+    progress: ProgressCallback | None = None,
+) -> ModelRecord:
+    options = options or TrainingOptions()
+    torch, _, _ = require_ml()
+    torch.manual_seed(options.seed)
 
-    train_loader = _build_loader(
+    frame = pd.read_csv(dataset.manifest_path, dtype=str).fillna("")
+    classes = sorted(frame["scientific_name"].unique())
+    train_frame = frame[frame["split"] == "train"].copy()
+    validation_frame = frame[frame["split"] == "validation"].copy()
+
+    train_dataset = _ButterflyDataset(
         train_frame,
-        class_to_index,
-        create_transform(image_size=config.image_size, training=True),
-        config,
-        torch,
-        training=True,
+        dataset.path,
+        classes,
+        image_transform(True, options.image_size),
     )
-    validation_loader = _build_loader(
+    validation_dataset = _ButterflyDataset(
         validation_frame,
-        class_to_index,
-        create_transform(image_size=config.image_size, training=False),
-        config,
-        torch,
-        training=False,
+        dataset.path,
+        classes,
+        image_transform(False, options.image_size),
     )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = create_classifier(
-        len(classes), backbone=config.backbone, pretrained=config.pretrained
-    ).to(device)
-    criterion = torch.nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs)
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
 
-    output_dir = Path(config.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    history: list[dict[str, Any]] = []
-    best_f1 = -1.0
-    stale_epochs = 0
-    checkpoint_path = output_dir / "best.pt"
-    for epoch in range(1, config.epochs + 1):
-        train_metrics = _run_epoch(
-            model, train_loader, criterion, device, torch, optimizer=optimizer, scaler=scaler
-        )
-        with torch.no_grad():
-            validation_metrics = _run_epoch(
-                model, validation_loader, criterion, device, torch
-            )
+    class_to_index = {name: index for index, name in enumerate(classes)}
+    class_counts = train_frame["scientific_name"].value_counts().to_dict()
+    sample_weights = [1.0 / class_counts[name] for name in train_frame["scientific_name"]]
+    sampler = torch.utils.data.WeightedRandomSampler(sample_weights, len(sample_weights), True)
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=options.batch_size,
+        sampler=sampler,
+        num_workers=0,
+    )
+    validation_loader = torch.utils.data.DataLoader(
+        validation_dataset,
+        batch_size=options.batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = create_model(len(classes), options.backbone, pretrained=True).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=options.learning_rate, weight_decay=options.weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=options.epochs)
+    criterion = torch.nn.CrossEntropyLoss(label_smoothing=options.label_smoothing)
+
+    timestamp = datetime.now(timezone.utc)
+    slug = re.sub(r"[^a-z0-9]+", "-", dataset.name.lower()).strip("-") or "dataset"
+    model_id = (
+        f"{slug}-{timestamp.strftime('%Y%m%d-%H%M%S')}-"
+        f"{dataset.fingerprint[:6]}{uuid4().hex[:4]}"
+    )
+    model_path = models_root / model_id
+    model_path.mkdir(parents=True, exist_ok=False)
+
+    best_accuracy = -1.0
+    history: list[dict[str, float | int]] = []
+    for epoch in range(1, options.epochs + 1):
+        model.train()
+        running_loss = 0.0
+        train_correct = 0
+        train_total = 0
+        for images, labels in train_loader:
+            images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(images)
+            loss = criterion(logits, labels)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item() * labels.size(0)
+            train_correct += (logits.argmax(dim=1) == labels).sum().item()
+            train_total += labels.size(0)
+
+        model.eval()
+        validation_correct = 0
+        validation_total = 0
+        with torch.inference_mode():
+            for images, labels in validation_loader:
+                images, labels = images.to(device), labels.to(device)
+                logits = model(images)
+                validation_correct += (logits.argmax(dim=1) == labels).sum().item()
+                validation_total += labels.size(0)
+
         scheduler.step()
-        row = {
-            "epoch": epoch,
-            "learning_rate": optimizer.param_groups[0]["lr"],
-            "train": train_metrics,
-            "validation": validation_metrics,
+        metrics = {
+            "train_loss": running_loss / max(train_total, 1),
+            "train_accuracy": train_correct / max(train_total, 1),
+            "validation_accuracy": validation_correct / max(validation_total, 1),
         }
-        history.append(row)
-        print(json.dumps(row, ensure_ascii=False))
-        if validation_metrics["macro_f1"] > best_f1:
-            best_f1 = validation_metrics["macro_f1"]
-            stale_epochs = 0
+        history.append({"epoch": epoch, **metrics})
+        if metrics["validation_accuracy"] > best_accuracy:
+            best_accuracy = metrics["validation_accuracy"]
             torch.save(
                 {
-                    "state_dict": model.state_dict(),
+                    "model_state": model.state_dict(),
                     "classes": classes,
-                    "backbone": config.backbone,
-                    "image_size": config.image_size,
-                    "reject_threshold": config.reject_threshold,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "config": asdict(config),
-                    "validation_metrics": validation_metrics,
+                    "backbone": options.backbone,
+                    "image_size": options.image_size,
                 },
-                checkpoint_path,
+                model_path / "best.pt",
             )
-        else:
-            stale_epochs += 1
-            if stale_epochs >= config.patience:
-                break
+        if progress:
+            progress(epoch, options.epochs, metrics)
 
-    (output_dir / "history.json").write_text(
-        json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    (output_dir / "class_names.json").write_text(
-        json.dumps(classes, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    model_card = {
-        "task": "European butterfly species identification",
-        "backbone": config.backbone,
-        "classes": len(classes),
-        "training_images": len(train_frame),
+    pd.DataFrame(history).to_csv(model_path / "history.csv", index=False)
+    references = _copy_reference_images(frame, dataset.path, model_path)
+    metadata = {
+        "model_id": model_id,
+        "dataset_name": dataset.name,
+        "dataset_fingerprint": dataset.fingerprint,
+        "created_at": timestamp.isoformat(),
+        "backbone": options.backbone,
+        "species": classes,
+        "references": references,
+        "best_validation_accuracy": best_accuracy,
+        "training_options": asdict(options),
+        "train_images": len(train_frame),
         "validation_images": len(validation_frame),
-        "best_validation_macro_f1": best_f1,
-        "domains": sorted(frame["domain"].unique().tolist()),
-        "limitations": [
-            "Predictions outside the training species are not taxonomic determinations.",
-            "Museum and in-situ field domains must be evaluated separately.",
-            "Low-confidence results require expert review.",
-        ],
+        "class_to_index": class_to_index,
     }
-    (output_dir / "model_card.json").write_text(
-        json.dumps(model_card, indent=2, ensure_ascii=False), encoding="utf-8"
+    write_model_metadata(model_path, metadata)
+    return ModelRecord(
+        model_id=model_id,
+        dataset_name=dataset.name,
+        created_at=timestamp.isoformat(),
+        path=model_path,
+        backbone=options.backbone,
+        species=tuple(classes),
+        references=references,
+        metadata=metadata,
     )
-    return checkpoint_path
-
-
-def evaluate(checkpoint_path: str | Path, manifest_path: str | Path, split: str = "test"):
-    try:
-        import torch
-    except ImportError as exc:
-        raise RuntimeError("Install training dependencies with: pip install -e .[ml]") from exc
-    checkpoint = load_torch_checkpoint(checkpoint_path)
-    classes = list(checkpoint["classes"])
-    class_to_index = {name: index for index, name in enumerate(classes)}
-    frame = pd.read_csv(manifest_path)
-    frame = frame[frame["split"] == split]
-    unknown = sorted(set(frame["scientific_name"]) - set(classes))
-    if unknown:
-        raise ValueError(f"Evaluation contains classes absent from checkpoint: {unknown[:10]}")
-    config = TrainingConfig(
-        manifest=str(manifest_path),
-        backbone=checkpoint["backbone"],
-        image_size=int(checkpoint["image_size"]),
-        pretrained=False,
-    )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = create_classifier(
-        len(classes), backbone=checkpoint["backbone"], pretrained=False
-    )
-    model.load_state_dict(checkpoint["state_dict"])
-    model.to(device)
-    loader = _build_loader(
-        frame,
-        class_to_index,
-        create_transform(image_size=config.image_size, training=False),
-        config,
-        torch,
-        training=False,
-    )
-    criterion = torch.nn.CrossEntropyLoss()
-    with torch.no_grad():
-        return _run_epoch(model, loader, criterion, device, torch)
-

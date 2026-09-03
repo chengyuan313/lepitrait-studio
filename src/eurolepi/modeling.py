@@ -1,73 +1,50 @@
-"""Model and image-transform factories.
-
-The default name matches timm's ImageNet-1K MaxViT-T checkpoint and mirrors the
-architecture selected by Barkmann et al. (2026).
-"""
+"""Lazy ML construction so dataset validation and the GUI can run without PyTorch."""
 
 from __future__ import annotations
 
 
 DEFAULT_BACKBONE = "maxvit_tiny_tf_224.in1k"
+IMAGE_SIZE = 224
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-def require_ml_dependencies():
+def require_ml():
     try:
         import timm
         import torch
-        import torchvision
+        from torchvision import transforms
     except ImportError as exc:
         raise RuntimeError(
-            "Machine-learning dependencies are not installed. Run: pip install -e .[ml]"
+            'Training and identification require the ML dependencies. Run: pip install -e ".[ml]"'
         ) from exc
-    return timm, torch, torchvision
+    return torch, timm, transforms
 
 
-def create_classifier(
-    class_count: int,
-    *,
-    backbone: str = DEFAULT_BACKBONE,
-    pretrained: bool = True,
-    drop_rate: float = 0.1,
-):
-    timm, _, _ = require_ml_dependencies()
-    return timm.create_model(
-        backbone,
-        pretrained=pretrained,
-        num_classes=class_count,
-        drop_rate=drop_rate,
-    )
+def create_model(class_count: int, backbone: str = DEFAULT_BACKBONE, pretrained: bool = True):
+    _, timm, _ = require_ml()
+    return timm.create_model(backbone, pretrained=pretrained, num_classes=class_count)
 
 
-def create_transform(*, image_size: int = 224, training: bool = False):
-    _, _, torchvision = require_ml_dependencies()
-    transforms = torchvision.transforms
+def image_transform(training: bool, image_size: int = IMAGE_SIZE):
+    _, _, transforms = require_ml()
+    normalization = transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)
     if training:
         return transforms.Compose(
             [
-                transforms.RandomResizedCrop(image_size, scale=(0.65, 1.0), ratio=(0.8, 1.2)),
-                transforms.RandomHorizontalFlip(p=0.3),
-                transforms.RandomRotation(degrees=25),
-                transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1),
+                transforms.RandomResizedCrop(image_size, scale=(0.72, 1.0)),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomRotation(12),
+                transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.12),
                 transforms.ToTensor(),
-                transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+                normalization,
             ]
         )
     return transforms.Compose(
         [
-            transforms.Resize(image_size + 32),
-            transforms.CenterCrop(image_size),
+            transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            normalization,
         ]
     )
-
-
-def load_torch_checkpoint(path, *, map_location="cpu"):
-    _, torch, _ = require_ml_dependencies()
-    try:
-        return torch.load(path, map_location=map_location, weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location=map_location)
 

@@ -1,4 +1,4 @@
-"""Command-line interface for dataset preparation, training and inference."""
+"""Command-line access to the same services used by the GUI."""
 
 from __future__ import annotations
 
@@ -6,110 +6,86 @@ import argparse
 import json
 from pathlib import Path
 
-import pandas as pd
-from PIL import Image
-
-from .manifest import assign_grouped_splits, validate_manifest
-
-
-def _validate(args) -> None:
-    frame = pd.read_csv(args.manifest)
-    report = validate_manifest(
-        frame,
-        require_files=not args.skip_file_check,
-        require_split=not args.before_split,
-        minimum_train_images=args.minimum_train_images,
-    )
-    print(
-        f"images={report.images} specimens={report.specimens} species={report.species} "
-        f"valid={report.valid}"
-    )
-    for warning in report.warnings:
-        print(f"WARNING: {warning}")
-    if report.errors:
-        raise SystemExit("Manifest invalid:\n- " + "\n- ".join(report.errors))
+from eurolepi.batch import identify_batch
+from eurolepi.dataset_package import inspect_dataset_zip
+from eurolepi.prediction import ButterflyIdentifier, open_image
+from eurolepi.registry import ModelRegistry
+from eurolepi.training import TrainingOptions, train_from_zip
 
 
-def _split(args) -> None:
-    frame = pd.read_csv(args.manifest)
-    result = assign_grouped_splits(
-        frame,
-        seed=args.seed,
-        validation_fraction=args.validation_fraction,
-        test_fraction=args.test_fraction,
-    )
-    result.to_csv(args.output, index=False)
-    print(result.groupby("split").size().to_string())
-    print(f"Wrote {args.output}")
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 
 
-def _train(args) -> None:
-    from .training import TrainingConfig, train
-
-    checkpoint = train(TrainingConfig.from_yaml(args.config))
-    print(f"Best checkpoint: {checkpoint}")
-
-
-def _evaluate(args) -> None:
-    from .training import evaluate
-
-    print(json.dumps(evaluate(args.checkpoint, args.manifest, args.split), indent=2))
-
-
-def _predict(args) -> None:
-    from .inference import ButterflyIdentifier
-
-    identifier = ButterflyIdentifier(args.checkpoint, threshold=args.threshold)
-    with Image.open(args.image) as handle:
-        result = identifier.predict(handle, top_k=args.top_k)
-    print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="eurolepi", description="European butterfly identification toolkit"
-    )
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="eurolepi")
+    parser.add_argument("--workspace", type=Path, default=Path("workspace"))
     commands = parser.add_subparsers(dest="command", required=True)
 
-    validate = commands.add_parser("validate", help="Validate a dataset manifest")
-    validate.add_argument("manifest", type=Path)
-    validate.add_argument("--skip-file-check", action="store_true")
-    validate.add_argument("--before-split", action="store_true")
-    validate.add_argument("--minimum-train-images", type=int, default=50)
-    validate.set_defaults(func=_validate)
+    validate = commands.add_parser("validate", help="Validate a training dataset ZIP")
+    validate.add_argument("dataset_zip", type=Path)
 
-    split = commands.add_parser("split", help="Create specimen-safe stratified splits")
-    split.add_argument("manifest", type=Path)
-    split.add_argument("--output", type=Path, default=Path("data/manifest.csv"))
-    split.add_argument("--seed", type=int, default=42)
-    split.add_argument("--validation-fraction", type=float, default=0.15)
-    split.add_argument("--test-fraction", type=float, default=0.15)
-    split.set_defaults(func=_split)
-
-    train = commands.add_parser("train", help="Train MaxViT-T from a YAML config")
-    train.add_argument("config", type=Path)
-    train.set_defaults(func=_train)
-
-    evaluate = commands.add_parser("evaluate", help="Evaluate a trained checkpoint")
-    evaluate.add_argument("checkpoint", type=Path)
-    evaluate.add_argument("manifest", type=Path)
-    evaluate.add_argument("--split", choices=["validation", "test"], default="test")
-    evaluate.set_defaults(func=_evaluate)
+    train = commands.add_parser("train", help="Train a model from a dataset ZIP")
+    train.add_argument("dataset_zip", type=Path)
+    train.add_argument("--dataset-name", required=True)
+    train.add_argument("--epochs", type=int, default=20)
+    train.add_argument("--batch-size", type=int, default=16)
 
     predict = commands.add_parser("predict", help="Identify one image")
-    predict.add_argument("checkpoint", type=Path)
+    predict.add_argument("model_id")
     predict.add_argument("image", type=Path)
-    predict.add_argument("--top-k", type=int, default=5)
-    predict.add_argument("--threshold", type=float)
-    predict.set_defaults(func=_predict)
+
+    batch = commands.add_parser("batch", help="Identify an image folder")
+    batch.add_argument("model_id")
+    batch.add_argument("folder", type=Path)
+    batch.add_argument("--output", type=Path, default=Path("identification_results.csv"))
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    args.func(args)
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    if args.command == "validate":
+        report = inspect_dataset_zip(args.dataset_zip.read_bytes())
+        print(json.dumps({
+            "valid": report.valid,
+            "images": report.image_count,
+            "specimens": report.specimen_count,
+            "species": report.species_count,
+            "errors": report.errors,
+            "warnings": report.warnings,
+        }, indent=2))
+        return 0 if report.valid else 1
+
+    if args.command == "train":
+        record = train_from_zip(
+            args.dataset_zip.read_bytes(),
+            args.dataset_name,
+            args.workspace,
+            TrainingOptions(epochs=args.epochs, batch_size=args.batch_size),
+        )
+        print(record.model_id)
+        return 0
+
+    registry = ModelRegistry(args.workspace / "models")
+    record = registry.get(args.model_id)
+    identifier = ButterflyIdentifier(record)
+    if args.command == "predict":
+        result = identifier.predict(open_image(args.image), top_k=5)
+        print(json.dumps([
+            {"rank": item.rank, "scientific_name": item.scientific_name, "probability": item.probability}
+            for item in result.candidates
+        ], indent=2))
+        return 0
+
+    files = [
+        (path.relative_to(args.folder).as_posix(), path.read_bytes())
+        for path in sorted(args.folder.rglob("*"))
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+    ]
+    identify_batch(files, identifier).to_csv(args.output, index=False)
+    print(args.output)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 

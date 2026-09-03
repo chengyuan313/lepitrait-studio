@@ -1,199 +1,390 @@
-"""Streamlit interface for EuroLepi ID inference and dataset readiness checks."""
+"""English Streamlit interface for the three EuroLepi ID workflows."""
 
 from __future__ import annotations
 
 from html import escape
-import json
+import os
 from pathlib import Path
 
 import pandas as pd
 from PIL import Image
 import streamlit as st
 
-from eurolepi.manifest import summarize_counts, validate_manifest
-from eurolepi.schemas import ImageDomain
+from eurolepi.batch import identify_batch
+from eurolepi.dataset_package import inspect_dataset_zip
+from eurolepi.prediction import ButterflyIdentifier
+from eurolepi.registry import ModelRegistry
+from eurolepi.training import TrainingOptions, train_from_zip
+
+
+WORKSPACE = Path(os.environ.get("EUROLEPI_WORKSPACE", "workspace"))
+MODELS_ROOT = WORKSPACE / "models"
+PAGE_NAMES = ("Train Model", "Single Identification", "Batch Identification")
 
 
 st.set_page_config(page_title="EuroLepi ID", page_icon="🦋", layout="wide")
-
 st.markdown(
     """
     <style>
     :root {
-      --ink: #142a33;
-      --mist: #edf3f4;
-      --panel: #f8fbfb;
-      --line: #c6d6d8;
-      --wing: #176b72;
-      --signal: #e49b25;
-      --deep: #173f5f;
+      --night: #102A36;
+      --lake: #286F7B;
+      --sky: #86B8C0;
+      --mist: #EEF4F3;
+      --paper: #FAFCFB;
+      --line: #C7D7D5;
+      --amber: #D99B42;
+      --ink-soft: #587078;
     }
-    .stApp { background: var(--mist); color: var(--ink); }
-    [data-testid="stSidebar"] { background: #dbe7e8; border-right: 1px solid var(--line); }
-    h1 { color: var(--deep); letter-spacing: -.045em; font-weight: 780; }
-    h2, h3 { color: var(--ink); letter-spacing: -.018em; }
-    .taxon-strip {
-      display: flex; align-items: center; gap: .65rem; margin-bottom: .4rem;
-      color: var(--wing); font: 700 .74rem/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
-      letter-spacing: .12em; text-transform: uppercase;
+    .stApp { background: var(--mist); color: var(--night); }
+    [data-testid="stSidebar"] {
+      background: var(--night);
+      border-right: 1px solid #274651;
     }
-    .taxon-strip:before, .taxon-strip:after { content: ""; height: 1px; background: var(--wing); }
-    .taxon-strip:before { width: 2.2rem; }
-    .taxon-strip:after { flex: 1; opacity: .25; }
-    .decision {
-      padding: 1rem 1.1rem; border: 1px solid var(--line); background: var(--panel);
-      box-shadow: 5px 5px 0 rgba(23,107,114,.10); margin: .4rem 0 1rem;
+    [data-testid="stSidebar"] * { color: #EFF7F6; }
+    [data-testid="stSidebar"] [role="radiogroup"] label {
+      padding: .65rem .7rem;
+      border-left: 3px solid transparent;
     }
-    .decision.review { border-left: 6px solid var(--signal); }
-    .decision.accepted { border-left: 6px solid var(--wing); }
-    .candidate { margin: .55rem 0 1rem; }
-    .candidate-line { display:flex; justify-content:space-between; gap:1rem; font-size:.95rem; }
-    .candidate-line em { font-family: Georgia, Cambria, serif; font-size:1.02rem; }
-    .confidence-track { height: 7px; margin-top:.35rem; background:#dce7e8; overflow:hidden; }
-    .confidence-fill { height:100%; background:linear-gradient(90deg,var(--wing),#51a59e); }
-    .protocol-note { padding:.8rem 1rem; background:#e4ecee; border-left:3px solid var(--deep); }
-    button:focus, input:focus, [tabindex]:focus { outline: 3px solid #72aeba !important; outline-offset: 2px; }
-    @media (prefers-reduced-motion: reduce) { * { scroll-behavior:auto !important; transition:none !important; } }
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+      background: #183B48;
+      border-left-color: var(--amber);
+    }
+    h1, h2, h3 { color: var(--night); letter-spacing: -.035em; }
+    h1 { font-family: Georgia, 'Times New Roman', serif; font-weight: 500; }
+    .brand {
+      color: #F6FBFA;
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 1.45rem;
+      line-height: 1;
+      margin: .75rem 0 .25rem;
+    }
+    .brand-note {
+      color: #A8C5C8;
+      font: 600 .67rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      margin-bottom: 2rem;
+    }
+    .eyebrow {
+      color: var(--lake);
+      font: 700 .72rem/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      margin: .4rem 0 .55rem;
+    }
+    .lede { color: var(--ink-soft); font-size: 1.02rem; max-width: 52rem; margin-bottom: 1.5rem; }
+    .contract {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--lake);
+      padding: 1rem 1.15rem;
+      margin: .6rem 0 1.25rem;
+      box-shadow: 7px 7px 0 rgba(40,111,123,.08);
+    }
+    .contract strong { color: var(--night); }
+    .contract code { color: var(--lake); }
+    .candidate-row {
+      display: grid;
+      grid-template-columns: 2.4rem minmax(12rem, 1fr) 5rem;
+      gap: .8rem;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      padding: .72rem 0 .45rem;
+    }
+    .rank {
+      color: var(--lake);
+      font: 700 .78rem/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    .species { font: italic 1.08rem/1.2 Georgia, 'Times New Roman', serif; }
+    .probability { font: 700 .82rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; text-align:right; }
+    .confidence-track { grid-column: 2 / 4; height: 5px; background: #DCE8E7; }
+    .confidence-fill { height: 100%; background: var(--lake); }
+    .reference-caption {
+      color: var(--ink-soft);
+      font: 600 .68rem/1.3 ui-monospace, SFMono-Regular, Consolas, monospace;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    div[data-testid="stMetric"] {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      padding: .65rem .8rem;
+    }
+    .stButton > button, .stDownloadButton > button {
+      border-radius: 2px;
+      border: 1px solid var(--lake);
+      background: var(--lake);
+      color: white;
+      font-weight: 700;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+      background: var(--night);
+      border-color: var(--night);
+      color: white;
+    }
+    button:focus, input:focus, [tabindex]:focus {
+      outline: 3px solid var(--amber) !important;
+      outline-offset: 2px;
+    }
+    @media (max-width: 700px) {
+      .candidate-row { grid-template-columns: 2rem 1fr 4.5rem; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { scroll-behavior: auto !important; transition: none !important; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
+def page_header(eyebrow: str, title: str, description: str) -> None:
+    st.markdown(f'<div class="eyebrow">{escape(eyebrow)}</div>', unsafe_allow_html=True)
+    st.title(title)
+    st.markdown(f'<div class="lede">{escape(description)}</div>', unsafe_allow_html=True)
+
+
+def model_selector(label: str, key: str):
+    records = ModelRegistry(MODELS_ROOT).list_models()
+    if not records:
+        st.info("No trained model is available. Complete Train Model first.")
+        return None
+    by_id = {record.model_id: record for record in records}
+    selected_id = st.selectbox(
+        label,
+        options=list(by_id),
+        format_func=lambda model_id: by_id[model_id].display_name,
+        key=key,
+    )
+    return by_id[selected_id]
+
+
 @st.cache_resource(show_spinner=False)
-def load_identifier(checkpoint_path: str, threshold: float):
-    from eurolepi.inference import ButterflyIdentifier
+def load_identifier(model_id: str, models_root: str):
+    record = ModelRegistry(Path(models_root)).get(model_id)
+    return ButterflyIdentifier(record)
 
-    return ButterflyIdentifier(checkpoint_path, threshold=threshold)
 
-
-def render_result(result) -> None:
-    state = "review" if result.rejected else "accepted"
-    headline = "需要专家复核" if result.rejected else escape(result.decision)
-    reason = (
-        f"最高置信度未达到 {result.threshold:.0%} 的拒识阈值。"
-        if result.rejected
-        else f"模型置信度达到设定阈值 {result.threshold:.0%}。"
-    )
-    st.markdown(
-        f'<div class="decision {state}"><strong>{headline}</strong><br><small>{reason}</small></div>',
-        unsafe_allow_html=True,
-    )
-    for candidate in result.predictions:
+def render_candidates(result) -> None:
+    st.subheader("Top-5 candidates")
+    for candidate in result.candidates:
         width = max(0.0, min(100.0, candidate.probability * 100))
-        st.markdown(
-            "<div class='candidate'>"
-            f"<div class='candidate-line'><span>{candidate.rank}. "
-            f"<em>{escape(candidate.scientific_name)}</em></span>"
-            f"<strong>{candidate.probability:.1%}</strong></div>"
-            f"<div class='confidence-track'><div class='confidence-fill' style='width:{width:.2f}%'></div></div>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-    st.download_button(
-        "下载鉴定结果",
-        json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
-        file_name="identification.json",
-        mime="application/json",
-    )
-
-
-st.markdown('<div class="taxon-strip">European butterfly identification</div>', unsafe_allow_html=True)
-st.title("EuroLepi ID")
-st.caption("面向欧洲蝴蝶的可训练图像鉴定框架 · MaxViT-T · Top-5 · 未知种拒识")
-
-with st.sidebar:
-    st.header("模型设置")
-    checkpoint = st.text_input("本地模型路径", value="models/eurolepi_maxvit_tiny/best.pt")
-    threshold = st.slider("拒识阈值", 0.0, 1.0, 0.65, 0.01)
-    top_k = st.slider("候选数量", 1, 10, 5)
-    st.divider()
-    st.caption("模型文件不会提交到Git。训练完成后将best.pt放在models目录即可。")
-
-identify_tab, dataset_tab, train_tab = st.tabs(["鉴定", "数据检查", "训练说明"])
-
-with identify_tab:
-    domain = st.selectbox(
-        "图像类型",
-        options=[item.value for item in ImageDomain],
-        format_func={
-            "museum_standardized": "博物馆标准标本照",
-            "field_standardized": "野外采集后的标准照",
-            "field_in_situ": "自然状态野外照",
-        }.get,
-    )
-    label_free = True
-    if domain == ImageDomain.MUSEUM_STANDARDIZED.value:
-        label_free = st.checkbox("确认分类图像中不含标签、二维码和馆藏号", value=False)
-    uploaded = st.file_uploader(
-        "上传一张蝴蝶图片", type=["jpg", "jpeg", "png", "tif", "tiff"]
-    )
-    if uploaded is None:
-        st.info("上传图片后，系统将显示Top-5候选；低于阈值时返回“需要专家复核”。")
-    else:
-        image = Image.open(uploaded).convert("RGB")
-        image_col, result_col = st.columns([1.45, 1], gap="large")
-        with image_col:
-            st.image(image, caption=f"输入图像 · {domain}", width="stretch")
-        with result_col:
-            if not label_free:
-                st.warning("请先裁掉标签、二维码、馆藏号和比例尺，避免模型利用文字作弊。")
-            elif not Path(checkpoint).is_file():
+        reference_column, result_column = st.columns([1, 3.2], gap="medium")
+        with reference_column:
+            if candidate.reference_image:
+                st.image(str(candidate.reference_image), width="stretch")
                 st.markdown(
-                    '<div class="protocol-note"><strong>框架已就绪，尚未加载模型。</strong><br>'
-                    "取得欧洲数据集并完成训练后，将生成的best.pt放入models目录。</div>",
+                    '<div class="reference-caption">Training reference</div>',
                     unsafe_allow_html=True,
                 )
             else:
-                try:
-                    with st.spinner("正在比较欧洲蝴蝶候选种…"):
-                        identifier = load_identifier(checkpoint, threshold)
-                        render_result(identifier.predict(image, top_k=top_k))
-                except (RuntimeError, ValueError, KeyError) as exc:
-                    st.error(str(exc))
-
-with dataset_tab:
-    st.subheader("训练数据是否可以直接使用？")
-    manifest_upload = st.file_uploader("上传CSV清单", type=["csv"], key="manifest")
-    if manifest_upload is None:
-        st.markdown(
-            "上传按照 `data/manifest.example.csv` 整理的清单。这里检查字段、物种标签、"
-            "标本跨集合泄漏和标签像素是否已经移除。"
-        )
-    else:
-        frame = pd.read_csv(manifest_upload)
-        report = validate_manifest(frame, require_files=False, require_split="split" in frame.columns)
-        a, b, c = st.columns(3)
-        a.metric("图片", report.images)
-        b.metric("标本", report.specimens)
-        c.metric("物种", report.species)
-        if report.valid:
-            st.success("清单结构通过检查。训练前请在本机再次执行文件存在性检查。")
-        for error in report.errors:
-            st.error(error)
-        for warning in report.warnings:
-            st.warning(warning)
-        if report.valid:
-            st.dataframe(
-                summarize_counts(frame, ["domain", "scientific_name"]),
-                hide_index=True,
-                width="stretch",
+                st.caption("Reference image unavailable")
+        with result_column:
+            st.markdown(
+                "<div class='candidate-row'>"
+                f"<span class='rank'>#{candidate.rank:02d}</span>"
+                f"<span class='species'>{escape(candidate.scientific_name)}</span>"
+                f"<span class='probability'>{candidate.probability:.1%}</span>"
+                "<div class='confidence-track'>"
+                f"<div class='confidence-fill' style='width:{width:.2f}%'></div></div>"
+                "</div>",
+                unsafe_allow_html=True,
             )
 
-with train_tab:
-    st.subheader("拿到欧洲数据后的四条命令")
-    st.code(
-        """python -m pip install -e \".[ml]\"
-eurolepi validate data/manifest_unsplit.csv --before-split
-eurolepi split data/manifest_unsplit.csv --output data/manifest.csv
-eurolepi train configs/maxvit_tiny.yaml""",
-        language="powershell",
+
+with st.sidebar:
+    st.markdown('<div class="brand">EuroLepi ID</div>', unsafe_allow_html=True)
+    st.markdown('<div class="brand-note">European butterfly classifier</div>', unsafe_allow_html=True)
+    page = st.radio("Workflow", PAGE_NAMES, label_visibility="collapsed")
+    st.divider()
+    st.caption("Models and uploaded datasets remain on this machine and are not committed to Git.")
+
+
+if page == "Train Model":
+    page_header(
+        "Workflow 01 · Build",
+        "Train Model",
+        "Create a reusable European butterfly classifier from one controlled dataset package.",
     )
     st.markdown(
-        "训练生成 `best.pt`、类别顺序、训练历史和模型卡。随后执行："
+        """
+        <div class="contract">
+          <strong>Upload one ZIP dataset.</strong><br>
+          The ZIP root must contain <code>manifest.csv</code> and an <code>images/</code> folder.
+          Only JPG, JPEG, and PNG images are accepted. The manifest must contain
+          <code>image_path</code>, <code>scientific_name</code>, and <code>specimen_id</code>.
+          Prepare at least 5 species and 3 distinct specimens per species. Crop museum labels,
+          QR codes, catalogue numbers, rulers, and colour cards out of every training image.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    st.code(
-        "eurolepi evaluate models/eurolepi_maxvit_tiny/best.pt data/manifest.csv",
-        language="powershell",
+    name_column, upload_column = st.columns([1, 1.45], gap="large")
+    with name_column:
+        dataset_name = st.text_input(
+            "Training dataset name",
+            placeholder="European butterflies — field survey 2027",
+            help="This name appears in the model selector after training.",
+        )
+    with upload_column:
+        archive = st.file_uploader(
+            "Training dataset (.zip)",
+            type=["zip"],
+            accept_multiple_files=False,
+            max_upload_size=2048,
+        )
+
+    inspection = None
+    archive_bytes = b""
+    if archive is not None:
+        archive_bytes = archive.getvalue()
+        with st.spinner("Checking archive structure, labels, and image files…"):
+            inspection = inspect_dataset_zip(archive_bytes)
+        metric_columns = st.columns(3)
+        metric_columns[0].metric("Images", inspection.image_count)
+        metric_columns[1].metric("Specimens", inspection.specimen_count)
+        metric_columns[2].metric("Species", inspection.species_count)
+        for error in inspection.errors:
+            st.error(error)
+        for warning in inspection.warnings:
+            st.warning(warning)
+        if inspection.valid and inspection.manifest is not None:
+            st.success("Dataset package passed all blocking checks.")
+            summary = (
+                inspection.manifest.groupby("scientific_name")
+                .agg(images=("image_path", "count"), specimens=("specimen_id", "nunique"))
+                .reset_index()
+            )
+            st.dataframe(summary, hide_index=True, width="stretch")
+
+    with st.expander("Training settings"):
+        settings = st.columns(3)
+        epochs = settings[0].number_input("Epochs", 1, 200, 20)
+        batch_size = settings[1].selectbox("Batch size", [4, 8, 16, 32, 64], index=2)
+        learning_rate = settings[2].number_input(
+            "Learning rate", min_value=0.000001, max_value=0.01, value=0.0003, format="%.6f"
+        )
+
+    ready = bool(dataset_name.strip()) and inspection is not None and inspection.valid
+    if st.button("Train model", type="primary", disabled=not ready, width="stretch"):
+        progress_bar = st.progress(0.0, text="Preparing training run…")
+        status = st.empty()
+
+        def update_progress(epoch, total, metrics):
+            progress_bar.progress(
+                epoch / total,
+                text=f"Epoch {epoch}/{total} · validation accuracy {metrics['validation_accuracy']:.1%}",
+            )
+            status.caption(
+                f"Training loss {metrics['train_loss']:.4f} · "
+                f"training accuracy {metrics['train_accuracy']:.1%}"
+            )
+
+        try:
+            record = train_from_zip(
+                archive_bytes,
+                dataset_name.strip(),
+                WORKSPACE,
+                TrainingOptions(
+                    epochs=int(epochs),
+                    batch_size=int(batch_size),
+                    learning_rate=float(learning_rate),
+                ),
+                update_progress,
+            )
+            load_identifier.clear()
+            st.success(f"Model trained and registered: {record.display_name}")
+        except (RuntimeError, ValueError, OSError) as exc:
+            st.error(str(exc))
+
+
+elif page == "Single Identification":
+    page_header(
+        "Workflow 02 · Compare",
+        "Single Identification",
+        "Choose a training dataset, upload one butterfly photograph, and inspect five visual matches.",
     )
-    st.caption("野外识别能力必须在field_in_situ测试集上单独报告，不能由博物馆标本准确率代替。")
+    record = model_selector("Training dataset / model", "single_model")
+    image_file = st.file_uploader(
+        "Butterfly image",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=False,
+        key="single_image",
+    )
+    if record and image_file:
+        try:
+            image = Image.open(image_file).convert("RGB")
+        except (OSError, ValueError) as exc:
+            st.error(f"The uploaded image cannot be read: {exc}")
+            st.stop()
+        left, right = st.columns([1.2, 1], gap="large")
+        with left:
+            st.image(image, caption=image_file.name, width="stretch")
+        with right:
+            st.markdown(
+                '<div class="contract"><strong>Selected training dataset</strong><br>'
+                f"{escape(record.dataset_name)}<br><small>{len(record.species)} species · "
+                f"{escape(record.backbone)}</small></div>",
+                unsafe_allow_html=True,
+            )
+            identify = st.button("Identify butterfly", type="primary", width="stretch")
+        if identify:
+            try:
+                with st.spinner("Comparing the image with the selected species set…"):
+                    identifier = load_identifier(record.model_id, str(MODELS_ROOT))
+                    result = identifier.predict(image, top_k=5)
+                render_candidates(result)
+            except (RuntimeError, ValueError, OSError, KeyError) as exc:
+                st.error(str(exc))
+    elif record:
+        st.info("Upload one JPG, JPEG, or PNG butterfly photograph to begin.")
+
+
+else:
+    page_header(
+        "Workflow 03 · Process",
+        "Batch Identification",
+        "Select a trained dataset, upload an image folder, and export one Top-5 row per image.",
+    )
+    record = model_selector("Training dataset / model", "batch_model")
+    folder_files = st.file_uploader(
+        "Butterfly image folder",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files="directory",
+        key="batch_folder",
+        help="All supported images in the selected folder and its subfolders will be uploaded.",
+    )
+    if folder_files:
+        st.caption(f"{len(folder_files)} image files selected.")
+    if record and folder_files and st.button(
+        "Run batch identification", type="primary", width="stretch"
+    ):
+        try:
+            with st.spinner(f"Identifying {len(folder_files)} images…"):
+                identifier = load_identifier(record.model_id, str(MODELS_ROOT))
+                file_payloads = [(item.name, item.getvalue()) for item in folder_files]
+                st.session_state["batch_results"] = identify_batch(file_payloads, identifier)
+                st.session_state["batch_model_id"] = record.model_id
+        except (RuntimeError, ValueError, OSError, KeyError) as exc:
+            st.error(str(exc))
+
+    batch_results: pd.DataFrame | None = st.session_state.get("batch_results")
+    if batch_results is not None and record is not None:
+        if st.session_state.get("batch_model_id") == record.model_id:
+            failed = int((batch_results["error"] != "").sum())
+            metric_columns = st.columns(3)
+            metric_columns[0].metric("Processed", len(batch_results))
+            metric_columns[1].metric("Completed", len(batch_results) - failed)
+            metric_columns[2].metric("Errors", failed)
+            st.dataframe(batch_results, hide_index=True, width="stretch")
+            st.download_button(
+                "Download identification_results.csv",
+                batch_results.to_csv(index=False).encode("utf-8-sig"),
+                file_name="identification_results.csv",
+                mime="text/csv",
+                type="primary",
+                width="stretch",
+            )
+        else:
+            st.info("Run the folder again after changing the selected training dataset.")
