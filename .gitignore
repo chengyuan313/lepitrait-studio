@@ -8,5 +8,9 @@ build/
 .DS_Store
 data/raw/
 data/processed/
-models/checkpoints/
-
+data/images/
+models/
+runs/
+*.pt
+*.pth
+*.bin

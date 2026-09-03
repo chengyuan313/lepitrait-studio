@@ -1,52 +1,36 @@
-# LepiTrait Studio
+# EuroLepi ID
 
-LepiTrait Studio 是面向标准化蝴蝶与蛾类标本照片的本地科研工作台。项目以 LEPY 的形态和颜色性状输出为核心参考，所有自动结果都保留质控状态、方法版本和人工复核入口。
+EuroLepi ID是一个只做欧洲蝴蝶图像物种鉴定的训练与推理框架。旧版LEPY、OCR、颜色、
+形态测量和气候匹配模块已经移除。
 
-## 当前版本
+## 现在能做什么
 
-- 标准标本图像质量检查；
-- 浅色统一背景下的透明分割基线；
-- 基于比例尺的像素/毫米形态指标；
-- 校准图像的 CIELAB 颜色统计；
-- 标本整图标签区域裁切、独立标签近照上传与本地 OCR；
-- 馆藏号、采集日期、模式状态和学名的保守解析与人工校正；
-- LEPY 与 BioCLIP 物种识别适配层；
-- JSON/CSV 导出；
-- Streamlit GUI。
+- 检查未来欧洲数据集的CSV清单；
+- 防止同一标本进入训练集和测试集；
+- 强制博物馆训练图片移除标签、二维码、馆藏号和比例尺；
+- 按物种进行标本级训练/验证/测试划分；
+- 使用MaxViT-T进行类别平衡微调；
+- 输出Top-5候选；
+- 低于阈值时返回“未知或需要专家复核”；
+- 分别记录博物馆标准照、野外标准照和自然状态野外照。
 
-内置分割算法仅用于开发和界面联调，不能替代经过验证的 LEPY 模型。正式研究需要接入固定版本的 LEPY，并使用人工测量数据评估误差。
-
-## 启动
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-streamlit run app.py
-```
-
-标签 OCR 需要本机安装 Tesseract。Windows PowerShell 可执行：
+## 拿到数据后的操作
 
 ```powershell
-winget install --id UB-Mannheim.TesseractOCR
-$env:TESSERACT_CMD="C:\Program Files\Tesseract-OCR\tesseract.exe"
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[ml]"
+
+eurolepi validate data/manifest_unsplit.csv --before-split
+eurolepi split data/manifest_unsplit.csv --output data/manifest.csv
+eurolepi validate data/manifest.csv
+eurolepi train configs/maxvit_tiny.yaml
+eurolepi evaluate models/eurolepi_maxvit_tiny/best.pt data/manifest.csv
 ```
 
-重新启动应用后，在 `Label record` 页面检查建议裁切范围并点击 `Run label OCR`。历史手写标签必须人工复核，OCR 文本不会进入物种识别模型。
+训练完成后启动GUI：
 
-运行测试：
-
-```bash
-python -m unittest discover -s tests -v
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-## 科学边界
-
-物种识别只接收统一方式拍摄的标本照片。分类器输入必须移除标签、比例尺和色卡，避免模型通过文字、馆藏编号或拍摄批次识别物种。自然环境中的活体照片不属于本项目范围。
-
-数据收集前请先阅读：
-
-- `docs/imaging_sop.md`：标准化拍摄规范；
-- `docs/data_dictionary.md`：数据字段；
-- `docs/ocr_benchmark.md`：首批真实图片 OCR 验证结果；
-- `training/README.md`：物种分类训练方案。
+清单格式见`data/manifest.example.csv`。详细要求见`docs/`。

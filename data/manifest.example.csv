@@ -1,0 +1,4 @@
+image_id,specimen_id,image_path,scientific_name,genus,family,view,domain,dataset_source,license,label_pixels_removed
+img-0001,specimen-0001,data/images/specimen-0001-dorsal.jpg,Pieris napi,Pieris,Pieridae,dorsal,museum_standardized,NHM iCollections,CC BY 4.0,true
+img-0002,specimen-0002,data/images/specimen-0002-field.jpg,Vanessa atalanta,Vanessa,Nymphalidae,dorsal,field_in_situ,European field dataset,verify-before-training,true
+

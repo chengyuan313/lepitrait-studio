@@ -1,65 +1,104 @@
-# LepiTrait Studio
+# EuroLepi ID
 
-LepiTrait Studio is a local, GUI-first research workflow for standardized butterfly and moth specimen photographs. It is designed around the trait outputs described by **LEPY** and keeps every automated result reviewable and versioned.
+EuroLepi ID is a training and inference framework for image-based identification of European
+butterflies. The repository has one scope: prepare a labelled image dataset, fine-tune a
+MaxViT-T classifier, evaluate each image domain separately, and return reviewable Top-k
+predictions with a low-confidence rejection decision.
 
-The first release provides:
+This repository replaces the former LEPY/OCR/trait-extraction prototype. It contains no label
+OCR, morphometrics, colour analysis, climate matching or LEPY adapter.
 
-- image quality checks for standardized specimen photographs;
-- a transparent white-background segmentation baseline;
-- scale-aware morphology measurements;
-- calibrated-image CIELAB colour summaries;
-- a reviewable label-panel crop, optional close-up upload and offline OCR;
-- conservative catalogue-number, date, type-status and scientific-name parsing;
-- a strict adapter boundary for LEPY and BioCLIP-based species identification;
-- JSON/CSV export with provenance and quality-control flags;
-- a Streamlit review interface.
+## Design boundary
 
-The built-in segmentation is a development baseline, not a replacement for LEPY. Production analyses should connect a validated LEPY runner and compare automated measurements with manual ground truth.
+- Primary task: European butterfly species classification.
+- Inputs: label-free museum images, standardised field specimens, and/or in-situ field images.
+- Default model: `maxvit_tiny_tf_224.in1k` from `timm`, following the MaxViT-T approach tested
+  by Barkmann, Lindner & Rüdisser (2026).
+- Output: Top-5 candidates plus `unknown_or_review` below a configurable threshold.
+- Split unit: specimen, never image.
+- Museum labels, QR codes, catalogue numbers and rulers are forbidden classifier pixels.
+- Accuracy is reported separately for museum and field domains.
 
-## Quick start
+## Install
+
+The dataset checker and GUI require Python 3.10 or newer:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install -e .
 streamlit run app.py
 ```
 
-Label OCR requires a local Tesseract executable. On Windows PowerShell:
+On Windows PowerShell:
 
 ```powershell
-winget install --id UB-Mannheim.TesseractOCR
-$env:TESSERACT_CMD="C:\Program Files\Tesseract-OCR\tesseract.exe"
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Restart the app, open `Label record`, verify the suggested crop, and select `Run label OCR`.
-Historical handwriting must be reviewed manually. OCR pixels and text never enter the species
-classifier.
-
-Run the command-line pipeline on one standardized image:
+Install the ML stack only on the training or inference machine:
 
 ```bash
-lepitrait specimen.jpg --specimen-id MZH-0001 --pixels-per-mm 42.8 --output result.json
+python -m pip install -e ".[ml]"
 ```
 
-Run tests without installing extra test packages:
+## Train when the European dataset is available
+
+1. Copy `data/manifest.example.csv` to `data/manifest_unsplit.csv` and add one row per image.
+2. Make every `image_path` point to an image that is safe for the classifier. For museum
+   images, remove all label, QR-code, catalogue-number and ruler pixels.
+3. Validate and create deterministic specimen-safe splits:
 
 ```bash
-python -m unittest discover -s tests -v
+eurolepi validate data/manifest_unsplit.csv --before-split
+eurolepi split data/manifest_unsplit.csv --output data/manifest.csv
+eurolepi validate data/manifest.csv
 ```
 
-## Scientific boundary
+4. Train and evaluate:
 
-Species identification is intentionally limited to standardized specimen photographs. Labels, rulers and colour charts must be excluded from the classifier input to prevent shortcut learning. Natural-scene photographs are outside the scope of this project.
+```bash
+eurolepi train configs/maxvit_tiny.yaml
+eurolepi evaluate models/eurolepi_maxvit_tiny/best.pt data/manifest.csv
+```
 
-Read [the imaging SOP](docs/imaging_sop.md), [architecture](docs/architecture.md),
-[data dictionary](docs/data_dictionary.md), and [OCR benchmark](docs/ocr_benchmark.md) before
-collecting training data.
+5. Run one prediction:
 
-## LEPY integration
+```bash
+eurolepi predict models/eurolepi_maxvit_tiny/best.pt butterfly.jpg
+```
 
-`lepitrait.lepy_adapter.LepyAdapter` is the stable boundary between this application and a locally installed LEPY workflow. The adapter expects a runner callable that receives an image path and output directory and returns a dictionary of measurements. This avoids copying or modifying upstream LEPY code and lets the project pin and validate a known upstream revision.
+The trainer writes `best.pt`, `class_names.json`, `history.json`, and `model_card.json`.
+Model weights and raw datasets are ignored by Git.
 
-## Species model integration
+## Repository map
 
-`lepitrait.identification.SpeciesIdentifier` defines the inference contract. A production implementation should use a BioCLIP 2/2.5 visual encoder fine-tuned on label-free, standardized museum specimen crops. The GUI remains usable before model weights are installed and clearly marks identification as unavailable.
+```text
+app.py                         Streamlit identification and dataset-check GUI
+configs/maxvit_tiny.yaml       Reproducible training configuration
+data/manifest.example.csv      Dataset contract example
+src/eurolepi/manifest.py       Validation and specimen-safe splitting
+src/eurolepi/training.py       Balanced MaxViT-T fine-tuning
+src/eurolepi/inference.py      Top-k prediction and rejection
+src/eurolepi/metrics.py        Accuracy and macro-F1 metrics
+docs/                          Dataset, training and evaluation protocols
+tests/                         Dependency-light integrity tests
+```
+
+Read [the dataset contract](docs/dataset_contract.md),
+[training protocol](docs/training_protocol.md), and
+[evaluation protocol](docs/evaluation_protocol.md) before using biological data.
+
+## Reference implementation
+
+The default architecture follows the public MaxViT-T butterfly work:
+
+- Barkmann F, Lindner A, Rüdisser J. 2026. *Comparing deep learning models for butterfly and
+  moth species identification*. DOI: `10.1111/icad.70123`.
+- Public Austrian model: <https://huggingface.co/RikeB/MaxViT_butterfly_identification>
+
+The Austrian checkpoint is not bundled because it targets citizen-science photographs from a
+limited Austrian species list. EuroLepi ID trains a new class head and checkpoint for the
+user-supplied European dataset.
