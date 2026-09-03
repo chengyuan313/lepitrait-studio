@@ -8,7 +8,8 @@ The first release provides:
 - a transparent white-background segmentation baseline;
 - scale-aware morphology measurements;
 - calibrated-image CIELAB colour summaries;
-- specimen-label OCR hooks and conservative metadata parsing;
+- a reviewable label-panel crop, optional close-up upload and offline OCR;
+- conservative catalogue-number, date, type-status and scientific-name parsing;
 - a strict adapter boundary for LEPY and BioCLIP-based species identification;
 - JSON/CSV export with provenance and quality-control flags;
 - a Streamlit review interface.
@@ -23,6 +24,17 @@ source .venv/bin/activate
 pip install -e .
 streamlit run app.py
 ```
+
+Label OCR requires a local Tesseract executable. On Windows PowerShell:
+
+```powershell
+winget install --id UB-Mannheim.TesseractOCR
+$env:TESSERACT_CMD="C:\Program Files\Tesseract-OCR\tesseract.exe"
+```
+
+Restart the app, open `Label record`, verify the suggested crop, and select `Run label OCR`.
+Historical handwriting must be reviewed manually. OCR pixels and text never enter the species
+classifier.
 
 Run the command-line pipeline on one standardized image:
 
@@ -40,7 +52,9 @@ python -m unittest discover -s tests -v
 
 Species identification is intentionally limited to standardized specimen photographs. Labels, rulers and colour charts must be excluded from the classifier input to prevent shortcut learning. Natural-scene photographs are outside the scope of this project.
 
-Read [the imaging SOP](docs/imaging_sop.md), [architecture](docs/architecture.md), and [data dictionary](docs/data_dictionary.md) before collecting training data.
+Read [the imaging SOP](docs/imaging_sop.md), [architecture](docs/architecture.md),
+[data dictionary](docs/data_dictionary.md), and [OCR benchmark](docs/ocr_benchmark.md) before
+collecting training data.
 
 ## LEPY integration
 
@@ -49,4 +63,3 @@ Read [the imaging SOP](docs/imaging_sop.md), [architecture](docs/architecture.md
 ## Species model integration
 
 `lepitrait.identification.SpeciesIdentifier` defines the inference contract. A production implementation should use a BioCLIP 2/2.5 visual encoder fine-tuned on label-free, standardized museum specimen crops. The GUI remains usable before model weights are installed and clearly marks identification as unavailable.
-

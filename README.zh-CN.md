@@ -8,7 +8,8 @@ LepiTrait Studio 是面向标准化蝴蝶与蛾类标本照片的本地科研工
 - 浅色统一背景下的透明分割基线；
 - 基于比例尺的像素/毫米形态指标；
 - 校准图像的 CIELAB 颜色统计；
-- 标签 OCR 接口和保守的元数据解析；
+- 标本整图标签区域裁切、独立标签近照上传与本地 OCR；
+- 馆藏号、采集日期、模式状态和学名的保守解析与人工校正；
 - LEPY 与 BioCLIP 物种识别适配层；
 - JSON/CSV 导出；
 - Streamlit GUI。
@@ -24,6 +25,15 @@ pip install -e .
 streamlit run app.py
 ```
 
+标签 OCR 需要本机安装 Tesseract。Windows PowerShell 可执行：
+
+```powershell
+winget install --id UB-Mannheim.TesseractOCR
+$env:TESSERACT_CMD="C:\Program Files\Tesseract-OCR\tesseract.exe"
+```
+
+重新启动应用后，在 `Label record` 页面检查建议裁切范围并点击 `Run label OCR`。历史手写标签必须人工复核，OCR 文本不会进入物种识别模型。
+
 运行测试：
 
 ```bash
@@ -38,5 +48,5 @@ python -m unittest discover -s tests -v
 
 - `docs/imaging_sop.md`：标准化拍摄规范；
 - `docs/data_dictionary.md`：数据字段；
+- `docs/ocr_benchmark.md`：首批真实图片 OCR 验证结果；
 - `training/README.md`：物种分类训练方案。
-

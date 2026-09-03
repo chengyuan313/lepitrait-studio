@@ -49,6 +49,7 @@ class SpecimenMetadata(BaseModel):
     sex: str | None = None
     institution_code: str | None = None
     collection_code: str | None = None
+    type_status: str | None = None
     verbatim_label: str | None = None
     field_confidence: dict[str, float] = Field(default_factory=dict)
 
@@ -90,7 +91,7 @@ class QualityFlag(BaseModel):
 
 
 class Provenance(BaseModel):
-    pipeline_version: str = "0.1.0"
+    pipeline_version: str = "0.2.0"
     trait_engine: str = "baseline"
     trait_engine_version: str = "0.1.0"
     identification_model: str | None = None
@@ -110,4 +111,3 @@ class SpecimenRecord(BaseModel):
     quality_flags: list[QualityFlag] = Field(default_factory=list)
     provenance: Provenance = Field(default_factory=Provenance)
     reviewed: bool = False
-

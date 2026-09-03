@@ -3,7 +3,9 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from lepitrait.metadata import parse_label
+from PIL import Image
+
+from lepitrait.metadata import parse_label, suggested_label_crop
 from lepitrait.pipeline import AnalysisPipeline
 from lepitrait.schema import ViewSide
 from training.validate_manifest import validate_manifest
@@ -43,6 +45,19 @@ class CorePipelineTests(unittest.TestCase):
         self.assertEqual(metadata.verbatim_scientific_name, "Parnassius apollo")
         self.assertEqual(metadata.event_date.isoformat(), "2019-07-21")
         self.assertAlmostEqual(metadata.decimal_latitude, 60.17)
+
+    def test_museum_label_parser_reads_catalog_date_and_type(self):
+        metadata = parse_label(
+            "Baguio, subprov. Benguet\n31. iii. 1912\nHOLO-TYPE\nNHMUK016480156"
+        )
+        self.assertEqual(metadata.catalog_number, "NHMUK016480156")
+        self.assertEqual(metadata.institution_code, "NHMUK")
+        self.assertEqual(metadata.event_date.isoformat(), "1912-03-31")
+        self.assertEqual(metadata.type_status, "holotype")
+
+    def test_label_crop_matches_standard_right_panel_layout(self):
+        crop = suggested_label_crop(Image.new("RGB", (1000, 500)))
+        self.assertEqual(crop.box, (560, 0, 1000, 410))
 
     def test_manifest_rejects_specimen_leakage(self):
         frame = pd.DataFrame(
