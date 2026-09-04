@@ -1,0 +1,4 @@
+specimen_id,scientific_name,site_id,country,latitude,longitude,collection_date,temperature_c
+FIN-HEL-0001,Pieris napi,FI-HEL-01,Finland,60.1699,24.9384,2027-06-14,18.2
+FIN-HEL-0002,Vanessa atalanta,FI-HEL-01,Finland,60.1699,24.9384,2027-06-14,18.2
+ESP-SIE-0001,Pieris napi,ES-SIE-03,Spain,37.0950,-3.3930,2027-07-02,24.7

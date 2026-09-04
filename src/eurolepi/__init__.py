@@ -1,4 +1,3 @@
-"""EuroLepi ID: European butterfly classifier training and inference."""
+"""EuroLepi Studio: European butterfly identification and field trait extraction."""
 
-__version__ = "2.0.0"
-
+__version__ = "2.1.0"
